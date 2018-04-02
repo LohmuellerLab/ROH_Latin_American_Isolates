@@ -1,0 +1,208 @@
+// Costa Rica, additive mutations, with inbreeding in last 15 generations
+initialize() {
+
+	initializeSLiMOptions(keepPedigrees=T);
+	
+	defineConstant("seqLength", 10000000);
+	defineConstant("Lns_over_Ls", 2.31);
+	defineConstant("ROHcutoff", 1000000);
+	defineConstant("simScalFac", 1);
+	defineConstant("sampleSize", 60);
+
+	initializeMutationRate(1.5e-8*simScalFac);
+	initializeRecombinationRate(1e-8*simScalFac);
+	
+	// m1 mutation type: neutral
+	initializeMutationType("m1", 0.5, "f", 0.0);
+	initializeMutationType("m2", 0.5, "g", -0.028*simScalFac, 0.19);
+	
+	m2.convertToSubstitution = T;
+	
+	// g1 genomic element type: uses m1 for all mutations
+	initializeGenomicElementType("g1", c(m1, m2), c(1,Lns_over_Ls));
+	initializeGenomicElementType("g2", m1, 1);
+	initializeGenomicElementType("g3", m1, 1);
+	
+	// Generate random genes along the chromosome
+	base = 0;
+	nc_length_total = 0;
+	in_length_total = 0;
+	ex_length_total = 0;
+	while (base < seqLength) {
+		// make a non-coding region
+		nc_length = asInteger(runif(1, 100, 5000)); nc_length_total = nc_length_total + nc_length;
+		initializeGenomicElement(g2, base, base + nc_length - 1);
+		base = base + nc_length;
+		// make first exon
+		ex_length = asInteger(rlnorm(1, log(50), log(2))) + 1; ex_length_total = ex_length_total + ex_length;
+		initializeGenomicElement(g1, base, base + ex_length - 1);
+		base = base + ex_length;
+		// make additional intron-exon pairs
+		do {
+			in_length = asInteger(rlnorm(1, log(100), log(1.5))) + 10; in_length_total = in_length_total + in_length;
+			initializeGenomicElement(g3, base, base + in_length - 1);
+			base = base + in_length;
+			ex_length = asInteger(rlnorm(1, log(50), log(2))) + 1; ex_length_total = ex_length_total + ex_length;
+			initializeGenomicElement(g1, base, base + ex_length - 1);
+			base = base + ex_length;
+		} while (runif(1) < 0.8); // 20% probability of stopping
+	}
+	// final non-coding region
+	nc_length = asInteger(runif(1, 100, 5000));
+	initializeGenomicElement(g2, base, base + nc_length - 1);
+
+	
+	// define some constants that will be used later for calculating summary statistics
+	defineConstant("in_length_total_c", in_length_total);
+	defineConstant("ex_length_total_c", ex_length_total);
+	defineConstant("nc_length_total_c", nc_length_total);
+
+}
+
+
+//Native Americans of Costa Rica
+1 {
+	cat("# gen popSize sampleSize mutLoad mutLoadFixed fitness numNeutral numNS numFixedNS Pneutral PNS meanTotalROH NeutralInROH NSInROH NeutralNotInROH NSNotInROH F" + "\n");
+	// save this run's identifier, used to save and restore
+	defineConstant("simID", getSeed());
+	sim.addSubpop("p1", 10000);
+		
+	sim.tag = 0;
+}
+
+70000 {
+	m2.convertToSubstitution = F;
+	p1.setSubpopulationSize(2000);
+}
+
+70167 {
+	sim.addSubpopSplit("p2", 2000, p1);
+}
+
+70834 {
+	p2.setSubpopulationSize(10000);
+}
+
+71500 {
+	p1.setSubpopulationSize(10000);
+}
+
+71650 {
+	p1.setSubpopulationSize(1000);
+}
+
+71651 {
+	p1.setMigrationRates(p2, 0.7);
+}
+
+71652 {
+	p1.setMigrationRates(p2, 0.0);
+	// p1.setSelfingRate(0.182);   // Start inbreeding by selfing...
+}
+
+71652:71667 mateChoice() {   // Inbreeding with 50% probability
+	if (runif(1) < 0.50) {
+		weights * ifelse(individual.relatedness(sourceSubpop.individuals) >= 0.25 & individual.relatedness(sourceSubpop.individuals) != 1.0 , 1.0 , 0.00001);
+	}
+	else {
+		weights;
+	}
+}
+
+71653 {
+	p2.setSubpopulationSize(0);
+}
+
+71660 {
+	p1.setSubpopulationSize(10000);
+	// p1.setSelfingRate(0);   // Stop inbreeding by selfing...?
+}
+
+71667 {sim.simulationFinished();}
+
+// output samples of 50 genomes periodically, all fixed mutations at end
+
+
+66667:71667 late() { 
+	if ((sim.generation % 100 == 0 & sim.generation < 71567) | sim.generation >= 71567) {
+		
+		// Population scale statistics of p1
+			
+		meanFitness = mean(p1.cachedFitness(NULL));
+		
+		i = p1.individuals;
+
+		mdel = i.genomes.mutations[i.genomes.mutations.mutationType == m2];
+		mutLoad = mdel.size()/i.size();
+		mdel_uniq = unique(mdel);
+		mdel_uniq_fixedID = apply(mdel_uniq, "sum(mdel == applyValue) == i.genomes.size();");
+		numFixedDel = sum(mdel_uniq_fixedID);
+		mutLoad_fixed = numFixedDel * 2;
+		
+		// Inbreeding F
+		
+		mneut_uniq = unique(i.genomes.mutations[i.genomes.mutations.mutationType == m1]);
+		
+		freq = sim.mutationFrequencies(p1, mneut_uniq); // freq of neut mutations in p1
+		ID = freq>0.05 & freq<0.95;  // Apply a frequency cutoff of MAF>5% 
+		
+		expHetPerSite = (4*i.size()^2*freq*(1-freq)/(2*i.size()-1))[ID];   // According to Hedrick book p. 92
+
+		obsHetPerSite = apply(mneut_uniq[ID], "firstChr = i.genomes.containsMutations(applyValue)[seq(0,i.genomes.size()-2,2)]; secondChr = i.genomes.containsMutations(applyValue)[seq(1,i.genomes.size()-1,2)]; numHets = sum((asInteger(firstChr) + asInteger(secondChr)) == 1); return(numHets);");
+
+		inbreedF = mean(1-obsHetPerSite/expHetPerSite);
+		
+		
+	   // Sample scale statistics
+		
+		i = sample(p1.individuals, sampleSize, F);
+		m = sortBy(i.genomes.mutations, "position");
+		m_uniq = unique(m);
+		DAF = apply(m_uniq, "sum(m == applyValue);");
+		m_uniq_polym = m_uniq[DAF != i.genomes.size()];
+		
+		NS_mut_in_sample = sum(i.countOfMutationsOfType(m2));
+		ROH_length_sumPerInd = c();
+		NS_mut_perInd = c();
+		Neutral_mut_perInd = c();
+		NS_mut_in_ROH_perInd = c();
+		Neutral_mut_in_ROH_perInd = c();
+		
+		for (individual in i) {
+		
+			indm = sortBy(individual.genomes.mutations, "position");
+			indm = indm[match(indm, m_uniq_polym) >= 0];   // Check that individual mutations are not fixed
+			indm_uniq = unique(indm);
+			NS_mut_perInd = c(NS_mut_perInd, sum(indm_uniq.mutationType == m2));
+			Neutral_mut_perInd = c(Neutral_mut_perInd, sum(indm_uniq.mutationType == m1)); 
+			genotype = apply(indm_uniq, "sum(indm == applyValue);");
+			
+			if (isNULL(genotype)) {
+				next;
+			}	
+			
+			ID_het = (genotype == 1);
+			ID_homDer = (genotype == 2);
+			pos_het = indm_uniq.position[ID_het];
+			startpos = c(0, pos_het);
+			endpos = c(pos_het, sim.chromosome.lastPosition);
+			pos_het_diff = endpos - startpos;
+			ROH_startpos = startpos[pos_het_diff > ROHcutoff];
+			ROH_endpos = endpos[pos_het_diff > ROHcutoff];
+			ROH_length = pos_het_diff[pos_het_diff > ROHcutoff];
+			ROH_length_sum = sum(ROH_length);
+			ROH_length_sumPerInd = c(ROH_length_sumPerInd, ROH_length_sum);
+
+			NS_mut_in_ROH_perInd = c(NS_mut_in_ROH_perInd, sum(c(apply(indm_uniq.position[ID_homDer & indm_uniq.mutationType == m2], "return(any(applyValue > ROH_startpos & applyValue < ROH_endpos));"), F)));
+
+			Neutral_mut_in_ROH_perInd = c(Neutral_mut_in_ROH_perInd, sum(c(apply(indm_uniq.position[ID_homDer & indm_uniq.mutationType == m1], "return(any(applyValue > ROH_startpos & applyValue < ROH_endpos));"), F)));
+	
+		}
+		
+		NS_mut_Not_In_ROH_perInd = sum(NS_mut_perInd - NS_mut_in_ROH_perInd);
+		Neutral_mut_Not_In_ROH_perInd = sum(Neutral_mut_perInd - Neutral_mut_in_ROH_perInd); 
+		
+		cat("# " + sim.generation + " " + p1.individuals.size() + " " + sampleSize + " " + mutLoad + " " + mutLoad_fixed + " " + meanFitness + " " + sum(m_uniq_polym.mutationType.id == 1) + " " + sum(m_uniq_polym.mutationType.id == 2) + " " + numFixedDel + " " + sum(m_uniq_polym.mutationType.id == 1)/(nc_length_total_c + in_length_total_c + ex_length_total_c/(Lns_over_Ls+1)) + " " + sum(m_uniq_polym.mutationType.id == 2)/(ex_length_total_c/(Lns_over_Ls+1)*Lns_over_Ls) + " " + mean(ROH_length_sumPerInd) + " " + sum(Neutral_mut_in_ROH_perInd) + " " + sum(NS_mut_in_ROH_perInd) + " " + Neutral_mut_Not_In_ROH_perInd + " " + NS_mut_Not_In_ROH_perInd + " " + inbreedF + "\n"); 
+				
+	}
+}
